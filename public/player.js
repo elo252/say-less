@@ -128,10 +128,16 @@
       err,
       btn
     );
+    const invited = !!params.get('room'); // came from a QR code / invite link: joining is the main action
     app.replaceChildren(h('div', { class: 'p-hero' },
       logo('4.2rem'),
       h('p', { class: 'muted', style: 'margin:0' }, 'The party game that makes you a sharper speaker.'),
-      form
+      h('h2', { class: 'choice-title' }, 'Join a game'),
+      form,
+      h('div', { class: 'or' }, h('span', {}, 'or')),
+      h('h2', { class: 'choice-title' }, 'Host a game'),
+      h('a', { class: `btn block ${invited ? 'ghost' : 'alt'}`, href: '/host', style: 'text-decoration:none;display:block' }, 'Create a room'),
+      h('p', { class: 'muted', style: 'margin:0;font-size:.9rem' }, 'Opens the host screen. Best on a laptop or TV everyone can see.')
     ));
     (code.value ? name : code).focus();
   }

@@ -265,3 +265,6 @@ body.host #app { min-height: 100vh; padding: 3vh 4vw; display: flex; flex-direct
 .card .pill.timer.low { background: var(--tomato); color: #fff; }
 .grid-cards .card .who { padding-right: 76px; }
 .reveal-head { display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; }
+.choice-title { font-size: 1.3rem; text-align: left; margin-bottom: -6px; }
+.or { display: flex; align-items: center; gap: 12px; color: var(--muted); font-weight: 700; }
+.or::before, .or::after { content: ''; flex: 1; height: 1px; background: var(--line); }

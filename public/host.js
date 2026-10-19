@@ -216,7 +216,8 @@
         e.currentTarget.disabled = true;
         const res = await act('host:create');
         if (res.ok) { session = { code: res.code, hostKey: res.hostKey }; save(STORE, session); }
-      } }, 'Create a room')
+      } }, 'Create a room'),
+      h('p', { style: 'margin-top:28px;font-size:1.1rem' }, h('a', { href: '/', style: 'color:var(--muted)' }, 'Joining a game instead? Go to the player screen'))
     )));
   }
 
