@@ -1,0 +1,24 @@
+{
+  "name": "say-less",
+  "version": "0.1.0",
+  "description": "An anonymous party game for verbal agility: The Missing Link, No 'Ums' Allowed, and One Line Pitch.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node test/game.test.js && node test/e2e.test.js && node test/auth.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED",
+  "private": true,
+  "dependencies": {
+    "express": "^4.22.3",
+    "qrcode": "^1.5.4",
+    "socket.io": "^4.8.4"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.4"
+  }
+}
