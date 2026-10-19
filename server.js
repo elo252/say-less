@@ -6,8 +6,8 @@ const express = require('express');
 const { Server } = require('socket.io');
 const QRCode = require('qrcode');
 const { Room, GameError } = require('./src/game');
-const { transcribe } = require('./src/transcribe');
 const auth = require('./src/auth');
+const { bankSize } = require('./src/prompts');
 
 const PORT = Number(process.env.PORT || 3000);
 const ROOM_TTL_MS = 3 * 60 * 60 * 1000;
@@ -33,7 +33,6 @@ app.get('/api/info', (_req, res) => {
   res.json({
     publicUrl: process.env.PUBLIC_URL || null,
     lanUrls: lanUrls(),
-    whisper: !!process.env.OPENAI_API_KEY,
   });
 });
 
@@ -89,20 +88,10 @@ function handle(cb, fn) {
   }
 }
 
-async function runTranscription(room, sub) {
-  let text = null;
-  let source = null;
-  try {
-    text = await transcribe(sub.audio, sub.mime);
-    if (text != null) source = 'whisper';
-  } catch (e) {
-    console.warn('[transcribe]', e.message);
-  }
-  if (text == null && sub.browserTranscript) {
-    text = sub.browserTranscript;
-    source = 'browser';
-  }
-  room.setTranscript(sub.sid, text, source);
+/** Filler counting uses the transcript the phone made with its own speech recognition — no AI service. */
+function scoreVoice(room, sub) {
+  // Resolve on the next tick so the round can first register that everyone has submitted.
+  setImmediate(() => room.setTranscript(sub.sid, sub.browserTranscript || null, sub.browserTranscript ? 'browser' : null));
 }
 
 io.on('connection', (socket) => {
@@ -179,7 +168,7 @@ io.on('connection', (socket) => {
 
   socket.on('player:submit', playerOnly((d) => {
     const sub = room.submit(playerId, d);
-    if (sub.kind === 'voice') runTranscription(room, sub);
+    if (sub.kind === 'voice') scoreVoice(room, sub);
     room.afterSubmit();
   }));
 
@@ -222,7 +211,7 @@ server.listen(PORT, () => {
   for (const u of lanUrls()) console.log(`  Phones on the same Wi-Fi join at:     ${u}`);
   if (process.env.PUBLIC_URL) console.log(`  Public link:                          ${process.env.PUBLIC_URL}`);
   console.log(`  Password protection: ${auth.enabled() ? 'ON' : 'off (set GAME_PASSWORD to turn on)'}`);
-  console.log(`  Filler counting: ${process.env.OPENAI_API_KEY ? 'Whisper API' : "phones' built-in speech recognition (set OPENAI_API_KEY for Whisper)"}\n`);
+  console.log(`  Prompt bank: ${Object.entries(bankSize()).map(([k, v]) => `${v.toLocaleString()} ${k}`).join(', ')}\n`);
 });
 
 module.exports = { server, rooms };

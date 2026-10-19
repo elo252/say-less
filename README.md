@@ -56,26 +56,37 @@ The repo includes `render.yaml`, so it deploys to [Render](https://render.com)'s
 
 1. Push this folder to a GitHub repo (private is fine).
 2. On Render: **New → Blueprint**, pick the repo.
-3. When asked, type a **GAME_PASSWORD** (and optionally an **OPENAI_API_KEY**), then **Apply**.
+3. When asked, type a **GAME_PASSWORD**, then **Apply**.
 4. Open `https://<your-app>.onrender.com/host`. Render gives you https, so voice rounds work on phones.
 
 With `GAME_PASSWORD` set, every page and every game connection requires the password. Each device enters it once (a 30-day cookie), and scanning the QR code brings players straight back to the room after they type it. Change the password in Render's environment settings to sign everyone out. Locally, password protection is off unless you set `GAME_PASSWORD`.
 
 Free Render apps go to sleep after ~15 minutes of no traffic; the first visit after that takes about a minute to wake up. Open the host page a minute before you play.
 
-### Filler-word counting
+### Filler-word counting (no AI)
 
-- **Default (free):** the phone's built-in speech recognition (Chrome on Android, Safari on iPhone) transcribes while you talk and counts the ums live. It sometimes tidies fillers away, so counts can run low.
-- **Better:** set an OpenAI API key and the server transcribes each clip with Whisper, using a prompt that nudges it to keep fillers:
+Nothing in the game uses an AI model or a paid API. Fillers are counted with a simple word list (`public/fillers.js`) run over the transcript the phone makes with its **own built-in speech recognition** while you talk (Chrome on Android, Safari on iPhone). The phone shows a live "Ums" counter as you speak.
 
-  ```bash
-  OPENAI_API_KEY=sk-... npm start
-  ```
-
-  Research suggests Whisper also tends to drop fillers by default, so **test this with a few real recordings before trusting the scores.**
-- If neither produces a transcript, the clip still plays and gets votes; it just isn't scored for fluency (and never busts).
+- Built-in speech recognition sometimes tidies fillers away, so counts can run a little low.
+- On browsers without speech recognition (e.g. Firefox), the clip still plays and gets votes; it just isn't scored for fluency, and it never busts.
 
 The bust rule is per minute: at least 3 fillers **and** more than 5 per minute (the rough point where research finds audiences start marking speakers down). Change it with `BUST_PER_MIN`.
+
+---
+
+## The prompt bank
+
+Everything players see comes from plain lists in `src/bank/` — edit them freely, no code changes needed:
+
+| File | What's in it | Variety |
+|---|---|---|
+| `objects.js` | Things for The Missing Link | ~290 objects → 42,000+ pairs |
+| `rants.js` | Topics for No 'Ums' Allowed | ~195 topics |
+| `pitch.js` | "Summarize…" prompts, plus concepts × audiences for "Explain X to Y" | ~80 summaries + ~8,000 combinations |
+| `tips.js` | Coach's tips shown after each round | 12 per mode |
+| `aliases.js` | Anonymous names and avatars | 30 × 30 aliases |
+
+Prompts never repeat within a game.
 
 ---
 
@@ -87,8 +98,6 @@ The bust rule is per minute: at least 3 fillers **and** more than 5 per minute (
 | `PUBLIC_URL` | — | Address the QR code points to (use your https tunnel/deploy URL) |
 | `GAME_PASSWORD` | — | Turns on the site-wide password |
 | `SESSION_SECRET` | — | Optional extra secret for the login cookie (Render generates one) |
-| `OPENAI_API_KEY` | — | Turns on Whisper transcription |
-| `TRANSCRIBE_MODEL` | `whisper-1` | Transcription model to use |
 | `MIN_PLAYERS` | `3` | Players needed to start (set to `2` for quick testing) |
 | `BUST_PER_MIN` | `5` | Fillers per minute that trigger a bust |
 
@@ -103,8 +112,8 @@ server.js            Express + Socket.io server, QR codes, routes events to the 
 src/auth.js          Optional password gate (GAME_PASSWORD)
 render.yaml          One-click deploy config for Render
 src/game.js          All game rules: rounds, timers, anonymity, voting, scoring
-src/prompts.js       Prompt decks — add your own lines here
-src/transcribe.js    Optional Whisper transcription
+src/prompts.js       Draws prompts from the bank without repeats
+src/bank/            The prompt bank — objects, rant topics, pitch prompts, coach's tips, aliases
 public/host.html/js  TV screen: lobby, reveals with voice disguise + text-to-speech, results
 public/index.html    Phone screen (player.js): join, type/record, vote
 public/fillers.js    Filler detection + fluency scoring (shared by server and phones)

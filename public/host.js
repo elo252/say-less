@@ -14,7 +14,7 @@
 
   let state = null;
   let screenKey = '';
-  let info = { lanUrls: [], publicUrl: null, whisper: false };
+  let info = { lanUrls: [], publicUrl: null };
   let session = load(STORE); // { code, hostKey }
   let revealToken = 0;
 

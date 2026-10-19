@@ -2,6 +2,8 @@
 // Every state change ends in this.sync(this), which pushes fresh views to the host and phones.
 const crypto = require('crypto');
 const { pickPrompt } = require('./prompts');
+const TIPS = require('./bank/tips');
+const { ADJECTIVES, CREATURES, AVATARS } = require('./bank/aliases');
 const Fillers = require('../public/fillers');
 
 const MIN_PLAYERS = Number(process.env.MIN_PLAYERS || 3);
@@ -24,12 +26,6 @@ const MODES = {
       { id: 'creative', label: 'Most Creative' },
       { id: 'convincing', label: 'Most Convincing' },
     ],
-    tips: [
-      'Look for a shared job: what does each thing actually do? Two different objects often solve the same problem.',
-      'Put both objects in one scene. A tiny story is easier to believe than an abstract link.',
-      'Find one shared property — shape, sound, material — then exaggerate it.',
-      'Use one as a metaphor for the other: "a lighthouse is a jellyfish that decided to get a job."',
-    ],
   },
   ums: {
     id: 'ums',
@@ -42,12 +38,6 @@ const MODES = {
     submitSecs: 75,
     voteSecs: 30,
     categories: [{ id: 'best', label: 'Most Entertaining' }],
-    tips: [
-      'Swap "um" for a silent pause. A pause sounds confident; a filler sounds unsure.',
-      'Plan your first sentence before you hit record — most fillers show up in the first five seconds.',
-      'Use a simple frame: point, example, punchline. Knowing what comes next keeps the "uh"s away.',
-      'Slow down. Fillers appear when your mouth gets ahead of your brain.',
-    ],
   },
   pitch: {
     id: 'pitch',
@@ -58,21 +48,9 @@ const MODES = {
     submitSecs: 60,
     voteSecs: 30,
     categories: [{ id: 'best', label: 'Clearest & Funniest' }],
-    tips: [
-      'Start with the verb: what actually happens?',
-      'Cut adjectives first — they rarely carry the meaning.',
-      'Decide the one thing your listener must remember, then build the sentence around it.',
-      'Try "X, but Y, so Z" — conflict and payoff in a single line.',
-    ],
   },
 };
 
-const ADJECTIVES = ['Secret', 'Anonymous', 'Mysterious', 'Masked', 'Incognito', 'Undercover', 'Hidden', 'Shadowy', 'Covert', 'Phantom', 'Disguised', 'Nameless'];
-const CREATURES = [
-  ['Alpaca', '🦙'], ['Flamingo', '🦩'], ['Otter', '🦦'], ['Octopus', '🐙'], ['Penguin', '🐧'], ['Sloth', '🦥'],
-  ['Hedgehog', '🦔'], ['Peacock', '🦚'], ['Raccoon', '🦝'], ['Narwhal', '🐋'], ['Moose', '🫎'], ['Parrot', '🦜'],
-];
-const AVATARS = ['🦊', '🐸', '🐼', '🐯', '🦉', '🐢', '🦋', '🐳', '🐝', '🦀', '🦁', '🐨', '🐙', '🦄'];
 const DISGUISES = ['helium', 'deep', 'robot'];
 
 class GameError extends Error {}
@@ -89,8 +67,7 @@ function shuffle(arr) {
 }
 
 function modeMeta(mode) {
-  const { tips, ...rest } = mode;
-  return rest;
+  return { ...mode };
 }
 
 class Room {
@@ -372,7 +349,7 @@ class Room {
       return { sid: s.sid, playerId: s.playerId, votes, voteCount, wins, points, fluencyPoints: s.fluencyPoints || 0 };
     });
     r.results = { entries, winners };
-    r.tip = pick(mode.tips);
+    r.tip = pick(TIPS[mode.id]);
     r.deadline = null;
     this.phase = 'results';
     this.sync(this);

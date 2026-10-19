@@ -9,7 +9,7 @@ const PORT = 3999;
 const URL = `http://localhost:${PORT}`;
 
 const srv = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
-  env: { ...process.env, PORT: String(PORT), OPENAI_API_KEY: '' },
+  env: { ...process.env, PORT: String(PORT) },
   stdio: ['ignore', 'pipe', 'inherit'],
 });
 

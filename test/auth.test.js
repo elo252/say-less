@@ -7,7 +7,7 @@ const { io } = require('socket.io-client');
 const PORT = 3998;
 const URL = `http://localhost:${PORT}`;
 const srv = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
-  env: { ...process.env, PORT: String(PORT), GAME_PASSWORD: 'pancake-pirates', OPENAI_API_KEY: '' },
+  env: { ...process.env, PORT: String(PORT), GAME_PASSWORD: 'pancake-pirates' },
   stdio: ['ignore', 'pipe', 'inherit'],
 });
 
