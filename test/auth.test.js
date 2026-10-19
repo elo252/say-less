@@ -71,6 +71,7 @@ async function main() {
   try {
     await new Promise((res) => locked.stdout.on('data', (d) => d.toString().includes('running') && res()));
     assert.equal((await fetch(`http://localhost:${LP}/host`)).status, 503);
+    assert.equal((await fetch(`http://localhost:${LP}/api/info`)).status, 503);
     assert.equal((await fetch(`http://localhost:${LP}/healthz`)).status, 200);
     const ok = await new Promise((res) => {
       const s = io(`http://localhost:${LP}`, { transports: ['websocket'], reconnection: false, timeout: 3000 });
@@ -80,6 +81,7 @@ async function main() {
     assert.equal(ok, false);
     console.log('  ✓ with REQUIRE_PASSWORD and no password set, the site stays locked');
   } finally { locked.kill(); }
+
   console.log('\nPassword test passed');
 }
 

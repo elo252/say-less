@@ -4,6 +4,9 @@
 const crypto = require('crypto');
 
 const PASSWORD = process.env.GAME_PASSWORD || '';
+// On a public host, REQUIRE_PASSWORD=true keeps the whole site closed until GAME_PASSWORD is set,
+// so it's never open to the internet by accident.
+const LOCKED = process.env.REQUIRE_PASSWORD === 'true' && !PASSWORD;
 const COOKIE = 'sl_auth';
 const MAX_AGE_SECS = 30 * 24 * 60 * 60;
 // Derived from the password (plus an optional secret), so changing the password signs everyone out.
@@ -88,6 +91,16 @@ function lockedPage() {
 <div class="big-emoji">🔒</div><h1 style="font-size:2rem">Not open yet</h1>
 <p class="muted">This game is private and hasn't been given a password yet.<br>Owner: add <b>GAME_PASSWORD</b> in your host's environment settings.</p>
 </div></main></body></html>`;
+}
+
+function lockedPage() {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
+<title>Say Less · Not open yet</title></head>
+<body style="margin:0;min-height:100vh;display:grid;place-items:center;background:#17112a;color:#fbf7ff;font-family:system-ui,sans-serif;text-align:center;padding:24px">
+<div><h1 style="font-size:2.4rem;margin:0 0 12px">Say <span style="color:#ffc83d">Less</span></h1>
+<p style="color:#b9add6;max-width:36ch">This game isn't open yet. The owner needs to set a password (GAME_PASSWORD) before anyone can play.</p></div>
+</body></html>`;
 }
 
 /** Express routes + gate. Call before serving any other route. */

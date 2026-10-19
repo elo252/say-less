@@ -10,6 +10,8 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "22"
+      - key: REQUIRE_PASSWORD  # site stays closed until GAME_PASSWORD is set
+        value: "true"
       - key: REQUIRE_PASSWORD  # keeps the site locked until GAME_PASSWORD is set
         value: "true"
       - key: GAME_PASSWORD   # you'll be asked to type this in when you deploy
