@@ -16,7 +16,7 @@ const tryConnect = (cookie) => new Promise((res) => {
   s.on('connect', () => { s.close(); res(true); });
   s.on('connect_error', () => { s.close(); res(false); });
 });
-const login = (password, next = '/host') => fetch(`${URL}/login`, {
+const login = (password, next = '/') => fetch(`${URL}/login`, {
   method: 'POST',
   redirect: 'manual',
   headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -32,7 +32,7 @@ async function main() {
   console.log('  ✓ pages redirect to the password screen (and remember the room code)');
 
   assert.equal((await fetch(`${URL}/api/info`)).status, 401);
-  assert.equal((await fetch(`${URL}/host.js`, { redirect: 'manual' })).status, 302);
+  assert.equal((await fetch(`${URL}/player.js`, { redirect: 'manual' })).status, 302);
   assert.equal((await fetch(`${URL}/healthz`)).status, 200);
   assert.equal((await fetch(`${URL}/login`)).status, 200);
   console.log('  ✓ API and scripts locked; health check and login page open');
@@ -52,7 +52,7 @@ async function main() {
   assert.match(r.headers.get('set-cookie'), /HttpOnly/);
   console.log('  ✓ wrong password rejected; right password sets a cookie and returns to the room');
 
-  assert.equal((await fetch(`${URL}/host`, { headers: { cookie } })).status, 200);
+  assert.equal((await fetch(`${URL}/`, { headers: { cookie } })).status, 200);
   assert.equal((await fetch(`${URL}/api/info`, { headers: { cookie } })).status, 200);
   assert.equal(await tryConnect(cookie), true);
   console.log('  ✓ with the cookie: pages, API and game connection all work');
@@ -70,7 +70,7 @@ async function main() {
   });
   try {
     await new Promise((res) => locked.stdout.on('data', (d) => d.toString().includes('running') && res()));
-    assert.equal((await fetch(`http://localhost:${LP}/host`)).status, 503);
+    assert.equal((await fetch(`http://localhost:${LP}/`)).status, 503);
     assert.equal((await fetch(`http://localhost:${LP}/api/info`)).status, 503);
     assert.equal((await fetch(`http://localhost:${LP}/healthz`)).status, 200);
     const ok = await new Promise((res) => {

@@ -1,6 +1,5 @@
 // Draws prompts from the bank in src/bank/. Edit those files to add your own.
 const OBJECTS = require('./bank/objects');
-const RANT_TOPICS = require('./bank/rants');
 const { SUMMARIES, CONCEPTS, AUDIENCES } = require('./bank/pitch');
 
 const rand = (arr) => arr[Math.floor(Math.random() * arr.length)];
@@ -12,10 +11,6 @@ function draw(mode) {
     let b = rand(OBJECTS);
     while (b === a) b = rand(OBJECTS);
     return { text: `${cap(a)} + ${b}`, parts: [cap(a), cap(b)], key: [a, b].sort().join('|') };
-  }
-  if (mode === 'ums') {
-    const t = rand(RANT_TOPICS);
-    return { text: t, key: t };
   }
   // One Line Pitch: about a third "Summarize…", the rest "Explain X to Y".
   if (Math.random() < 0.35) {
@@ -40,7 +35,6 @@ function pickPrompt(mode, used = new Set()) {
 const bankSize = () => ({
   linkObjects: OBJECTS.length,
   linkPairs: (OBJECTS.length * (OBJECTS.length - 1)) / 2,
-  rantTopics: RANT_TOPICS.length,
   pitchSummaries: SUMMARIES.length,
   pitchExplain: CONCEPTS.length * AUDIENCES.length,
 });

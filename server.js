@@ -1,4 +1,4 @@
-// Say Less — game server. Run with `npm start`, then open /host on the TV/laptop.
+// Say Less — game server. Run with `npm start`, then open the site on any phone or laptop.
 const path = require('path');
 const http = require('http');
 const os = require('os');
@@ -12,11 +12,12 @@ const { bankSize } = require('./src/prompts');
 const PORT = Number(process.env.PORT || 3000);
 const ROOM_TTL_MS = 3 * 60 * 60 * 1000;
 const LOBBY_DROP_MS = 30 * 1000;
+const HOST_HANDOVER_MS = 45 * 1000; // if the host's phone is gone this long, the next player gets the controls
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-  maxHttpBufferSize: 8e6,
+  maxHttpBufferSize: 1e5,
   // Reject the connection outright when the site password is on and this device hasn't entered it.
   allowRequest: (req, cb) => cb(null, auth.isAuthed(req.headers.cookie)),
 });
@@ -27,7 +28,7 @@ app.set('trust proxy', 1); // behind Render/Railway/etc., so secure cookies and 
 app.get('/healthz', (_req, res) => res.send('ok'));
 auth.install(app);
 app.use(express.static(path.join(__dirname, 'public')));
-app.get('/host', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'host.html')));
+app.get('/host', (_req, res) => res.redirect('/')); // old link: hosting now happens on the main page
 
 app.get('/api/info', (_req, res) => {
   res.json({
@@ -68,7 +69,6 @@ function newCode() {
 /** Push each screen its own view of the room. */
 function sync(room) {
   room.touch();
-  if (room.hostSocketId) io.to(room.hostSocketId).emit('host:state', room.hostView());
   for (const p of room.players.values()) {
     if (p.socketId) io.to(p.socketId).emit('player:state', room.playerView(p.id));
   }
@@ -88,113 +88,77 @@ function handle(cb, fn) {
   }
 }
 
-/** Filler counting uses the transcript the phone made with its own speech recognition — no AI service. */
-function scoreVoice(room, sub) {
-  // Resolve on the next tick so the round can first register that everyone has submitted.
-  setImmediate(() => room.setTranscript(sub.sid, sub.browserTranscript || null, sub.browserTranscript ? 'browser' : null));
-}
-
 io.on('connection', (socket) => {
-  let role = null;
   let room = null;
   let playerId = null;
   const findRoom = (code) => rooms.get(String(code || '').toUpperCase().trim());
 
-  // ----- Host -----
-  socket.on('host:create', (_d, cb) =>
+  function seat(r, p) {
+    if (p.socketId && p.socketId !== socket.id) io.to(p.socketId).emit('player:replaced');
+    p.socketId = socket.id;
+    p.connected = true;
+    room = r;
+    playerId = p.id;
+    sync(r);
+    return { playerId: p.id, code: r.code, name: p.name };
+  }
+
+  // Create a room: the creator becomes the first player and the host.
+  socket.on('player:create', (d, cb) =>
     handle(cb, () => {
+      const name = String(d?.name || '').trim();
+      if (!name) throw new GameError('Pick a name first.');
       const code = newCode();
-      room = new Room(code, sync);
-      rooms.set(code, room);
-      room.hostSocketId = socket.id;
-      role = 'host';
-      sync(room);
-      return { code, hostKey: room.hostKey };
+      const r = new Room(code, sync);
+      rooms.set(code, r);
+      return seat(r, r.addPlayer(name));
     })
   );
 
-  socket.on('host:rejoin', (d, cb) =>
-    handle(cb, () => {
-      const r = findRoom(d?.code);
-      if (!r || r.hostKey !== d?.hostKey) throw new GameError('That room has closed.');
-      room = r;
-      role = 'host';
-      r.hostSocketId = socket.id;
-      sync(r);
-      return { code: r.code };
-    })
-  );
-
-  const hostOnly = (fn) => (d, cb) =>
-    handle(cb, () => {
-      if (role !== 'host' || !room) throw new GameError('Only the host can do that.');
-      return fn(d || {});
-    });
-
-  socket.on('host:settings', hostOnly((d) => { room.updateSettings(d); sync(room); }));
-  socket.on('host:start', hostOnly(() => room.start()));
-  socket.on('host:revealDone', hostOnly((d) => room.endReveal(d.roundIndex)));
-  socket.on('host:skip', hostOnly(() => room.skipPhase()));
-  socket.on('host:next', hostOnly(() => room.advance()));
-  socket.on('host:playAgain', hostOnly(() => room.toLobby()));
-  socket.on('host:getAudio', hostOnly((d) => {
-    const s = room.findSub(d.sid);
-    if (!s?.audio) throw new GameError('No audio for that answer.');
-    return { audio: s.audio, mime: s.mime };
-  }));
-
-  // ----- Players -----
   socket.on('player:join', (d, cb) =>
     handle(cb, () => {
       const r = findRoom(d?.code);
       if (!r) throw new GameError("Can't find that room code.");
-      const p = r.addPlayer(d?.name, d?.playerId);
-      if (p.socketId && p.socketId !== socket.id) io.to(p.socketId).emit('player:replaced');
-      p.socketId = socket.id;
-      p.connected = true;
-      room = r;
-      role = 'player';
-      playerId = p.id;
-      sync(r);
-      return { playerId: p.id, code: r.code, name: p.name };
+      return seat(r, r.addPlayer(d?.name, d?.playerId));
     })
   );
 
-  const playerOnly = (fn) => (d, cb) =>
+  const inRoom = (fn) => (d, cb) =>
     handle(cb, () => {
-      if (role !== 'player' || !room) throw new GameError('Join a room first.');
+      if (!room || !playerId) throw new GameError('Join a room first.');
       return fn(d || {});
     });
+  const hostOnly = (fn) => inRoom((d) => {
+    if (!room.isHost(playerId)) throw new GameError('Only the host can do that.');
+    return fn(d);
+  });
 
-  socket.on('player:submit', playerOnly((d) => {
-    const sub = room.submit(playerId, d);
-    if (sub.kind === 'voice') scoreVoice(room, sub);
-    room.afterSubmit();
-  }));
+  socket.on('player:submit', inRoom((d) => { room.submit(playerId, d); room.afterSubmit(); }));
+  socket.on('player:vote', inRoom((d) => room.vote(playerId, d.category, d.sid)));
 
-  socket.on('player:vote', playerOnly((d) => room.vote(playerId, d.category, d.sid)));
+  socket.on('host:settings', hostOnly((d) => { room.updateSettings(d); sync(room); }));
+  socket.on('host:start', hostOnly(() => room.start()));
+  socket.on('host:skip', hostOnly(() => room.skipPhase()));
+  socket.on('host:next', hostOnly(() => room.advance()));
+  socket.on('host:playAgain', hostOnly(() => room.toLobby()));
 
   socket.on('disconnect', () => {
-    if (!room) return;
+    if (!room || !playerId) return;
     const r = room;
-    if (role === 'host' && r.hostSocketId === socket.id) r.hostSocketId = null;
-    if (role === 'player') {
-      const p = r.players.get(playerId);
-      if (p && p.socketId === socket.id) {
-        p.connected = false;
-        p.socketId = null;
-        const id = playerId;
-        // A phone that locks briefly shouldn't lose its seat; only drop lobby players who stay gone.
-        setTimeout(() => {
-          const still = r.players.get(id);
-          if (still && !still.connected && r.phase === 'lobby') {
-            r.players.delete(id);
-            sync(r);
-          }
-        }, LOBBY_DROP_MS);
-        r.checkProgress();
-      }
+    const id = playerId;
+    const p = r.players.get(id);
+    if (!p || p.socketId !== socket.id) return; // already reconnected elsewhere
+    p.connected = false;
+    p.socketId = null;
+    // A phone that locks briefly shouldn't lose its seat; only drop lobby players who stay gone.
+    setTimeout(() => {
+      const still = r.players.get(id);
+      if (still && !still.connected && r.phase === 'lobby') { r.removePlayer(id); sync(r); }
+    }, LOBBY_DROP_MS);
+    if (r.isHost(id)) {
+      setTimeout(() => { if (r.passHostIfGone()) sync(r); }, HOST_HANDOVER_MS);
     }
+    r.checkProgress();
     sync(r);
   });
 });
@@ -207,8 +171,8 @@ setInterval(() => {
 
 server.listen(PORT, () => {
   console.log(`\n  Say Less is running.\n`);
-  console.log(`  Host screen (open on the TV/laptop):  http://localhost:${PORT}/host`);
-  for (const u of lanUrls()) console.log(`  Phones on the same Wi-Fi join at:     ${u}`);
+  console.log(`  Open on this computer:            http://localhost:${PORT}`);
+  for (const u of lanUrls()) console.log(`  Phones on the same Wi-Fi:         ${u}`);
   if (process.env.PUBLIC_URL) console.log(`  Public link:                          ${process.env.PUBLIC_URL}`);
   console.log(`  Password protection: ${auth.enabled() ? 'ON' : auth.locked() ? 'LOCKED until GAME_PASSWORD is set' : 'off (set GAME_PASSWORD to turn on)'}`);
   console.log(`  Prompt bank: ${Object.entries(bankSize()).map(([k, v]) => `${v.toLocaleString()} ${k}`).join(', ')}\n`);

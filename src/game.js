@@ -1,24 +1,22 @@
 // Core game logic. No networking in here — server.js wires it to Socket.io.
-// Every state change ends in this.sync(this), which pushes fresh views to the host and phones.
+// Every device is a player. Whoever creates the room is also the host: they play like everyone
+// else and also get the Start / Next / End-early buttons. Every state change ends in this.sync(this).
 const crypto = require('crypto');
 const { pickPrompt } = require('./prompts');
 const TIPS = require('./bank/tips');
 const { ADJECTIVES, CREATURES, AVATARS } = require('./bank/aliases');
-const Fillers = require('../public/fillers');
 
-const MIN_PLAYERS = Number(process.env.MIN_PLAYERS || 3);
+const MIN_PLAYERS = Number(process.env.MIN_PLAYERS || 3); // includes the host
 const MAX_PLAYERS = 12;
-const BUST_PER_MIN = Number(process.env.BUST_PER_MIN || Fillers.DEFAULT_BUST_PER_MIN);
+const ROUNDS = Number(process.env.ROUNDS || 6);
 const POINTS_PER_VOTE = 100;
 const WINNER_BONUS = 100;
-const VOICE_GRACE_MS = 3000; // lets a phone that's mid-recording finish uploading after the clock hits zero
 
 const MODES = {
   link: {
     id: 'link',
     name: 'The Missing Link',
     tagline: 'Connect two things that have no business being connected.',
-    input: 'text',
     maxWords: 40,
     submitSecs: 60,
     voteSecs: 30,
@@ -27,31 +25,16 @@ const MODES = {
       { id: 'convincing', label: 'Most Convincing' },
     ],
   },
-  ums: {
-    id: 'ums',
-    name: "No 'Ums' Allowed",
-    tagline: 'Talk for 30–45 seconds. No ums. No uhs. The robot is listening.',
-    input: 'voice',
-    maxWords: 120, // only used for the typed fallback
-    recordMinSecs: 10,
-    recordMaxSecs: 45,
-    submitSecs: 75,
-    voteSecs: 30,
-    categories: [{ id: 'best', label: 'Most Entertaining' }],
-  },
   pitch: {
     id: 'pitch',
     name: 'One Line Pitch',
     tagline: 'One sentence. Twenty words. Make it land.',
-    input: 'text',
     maxWords: 20,
     submitSecs: 60,
     voteSecs: 30,
     categories: [{ id: 'best', label: 'Clearest & Funniest' }],
   },
 };
-
-const DISGUISES = ['helium', 'deep', 'robot'];
 
 class GameError extends Error {}
 
@@ -66,19 +49,14 @@ function shuffle(arr) {
   return a;
 }
 
-function modeMeta(mode) {
-  return { ...mode };
-}
-
 class Room {
   constructor(code, sync = () => {}) {
     this.code = code;
     this.sync = sync;
-    this.hostKey = crypto.randomUUID();
-    this.hostSocketId = null;
+    this.hostId = null;
     this.players = new Map();
-    this.phase = 'lobby'; // lobby → submit → (processing) → reveal → vote → results → … → final
-    this.settings = { rounds: 6, modes: ['link', 'ums', 'pitch'], disguise: 'random', revealAuthors: true };
+    this.phase = 'lobby'; // lobby → submit → vote → results → … → final
+    this.settings = { modes: ['link', 'pitch'], revealAuthors: true };
     this.plan = [];
     this.roundIndex = -1;
     this.round = null;
@@ -104,7 +82,7 @@ class Room {
     return null;
   }
 
-  // ---------- Lobby ----------
+  // ---------- Players & host ----------
 
   addPlayer(rawName, playerId) {
     if (playerId && this.players.has(playerId)) return this.players.get(playerId); // reconnect
@@ -117,27 +95,47 @@ class Room {
     const avatar = AVATARS.find((a) => !usedAvatars.has(a)) || pick(AVATARS);
     const player = { id: crypto.randomUUID(), name, avatar, score: 0, socketId: null, connected: true };
     this.players.set(player.id, player);
+    if (!this.hostId) this.hostId = player.id; // the room's creator
     this.touch();
     return player;
   }
 
+  isHost(playerId) { return !!playerId && playerId === this.hostId; }
+
+  /** If the host has left, hand the controls to the next connected player. */
+  passHostIfGone() {
+    const host = this.players.get(this.hostId);
+    if (host && host.connected) return false;
+    const next = this.connectedPlayers()[0];
+    if (!next || next.id === this.hostId) return false;
+    this.hostId = next.id;
+    return true;
+  }
+
+  removePlayer(playerId) {
+    this.players.delete(playerId);
+    if (this.hostId === playerId) {
+      this.hostId = null;
+      const next = this.connectedPlayers()[0] || [...this.players.values()][0];
+      if (next) this.hostId = next.id;
+    }
+  }
+
   updateSettings(s = {}) {
     if (!['lobby', 'final'].includes(this.phase)) throw new GameError('Change settings between games.');
-    if ([3, 6, 9].includes(Number(s.rounds))) this.settings.rounds = Number(s.rounds);
     if (Array.isArray(s.modes)) {
-      const modes = s.modes.filter((m) => MODES[m]);
+      const modes = [...new Set(s.modes.filter((m) => MODES[m]))];
       if (!modes.length) throw new GameError('Pick at least one mode.');
-      this.settings.modes = [...new Set(modes)];
+      this.settings.modes = modes;
     }
-    if (['random', 'none', ...DISGUISES].includes(s.disguise)) this.settings.disguise = s.disguise;
     if (typeof s.revealAuthors === 'boolean') this.settings.revealAuthors = s.revealAuthors;
   }
 
   start() {
     if (!['lobby', 'final'].includes(this.phase)) throw new GameError('A game is already running.');
     if (this.connectedPlayers().length < MIN_PLAYERS) throw new GameError(`You need at least ${MIN_PLAYERS} players.`);
-    const order = ['link', 'ums', 'pitch'].filter((m) => this.settings.modes.includes(m));
-    this.plan = Array.from({ length: this.settings.rounds }, (_, i) => order[i % order.length]);
+    const order = ['link', 'pitch'].filter((m) => this.settings.modes.includes(m));
+    this.plan = Array.from({ length: ROUNDS }, (_, i) => order[i % order.length]);
     for (const p of this.players.values()) p.score = 0;
     this.roundIndex = -1;
     this.usedPrompts.clear();
@@ -176,8 +174,7 @@ class Room {
       deadline: now() + mode.submitSecs * 1000,
     };
     this.phase = 'submit';
-    const grace = mode.input === 'voice' ? VOICE_GRACE_MS : 0;
-    this.setTimer(mode.submitSecs * 1000 + grace, () => this.endSubmit());
+    this.setTimer(mode.submitSecs * 1000, () => this.endSubmit());
     this.sync(this);
   }
 
@@ -186,28 +183,10 @@ class Room {
     if (this.phase !== 'submit' || !r) throw new GameError('Submissions are closed.');
     if (!this.players.has(playerId)) throw new GameError('You are not in this room.');
     if (r.submissions.has(playerId)) throw new GameError('You already locked in.');
-    const mode = this.mode;
-    const sub = { sid: crypto.randomBytes(6).toString('hex'), playerId, kind: 'text', text: '' };
-
-    if (mode.input === 'text' || data.typed) {
-      const words = String(data.text || '').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
-      if (!words.length) throw new GameError('Write something first!');
-      if (words.length > mode.maxWords) throw new GameError(`Keep it to ${mode.maxWords} words.`);
-      sub.text = words.join(' ').slice(0, 600);
-      sub.kind = mode.input === 'voice' ? 'typed' : 'text';
-    } else {
-      const audio = data.audio;
-      if (!Buffer.isBuffer(audio) || audio.length < 500) throw new GameError('That recording was empty — try again.');
-      if (audio.length > 6e6) throw new GameError('That recording is too large.');
-      sub.kind = 'voice';
-      sub.audio = audio;
-      sub.mime = String(data.mime || 'audio/webm').slice(0, 60);
-      sub.durationSec = Math.max(0, Math.min(mode.recordMaxSecs + 2, Number(data.durationSec) || 0));
-      sub.browserTranscript = String(data.browserTranscript || '').slice(0, 3000);
-      sub.transcript = null;
-      sub.transcriptSource = null;
-      sub.pending = true; // waiting for speech-to-text
-    }
+    const words = String(data.text || '').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+    if (!words.length) throw new GameError('Write something first!');
+    if (words.length > this.mode.maxWords) throw new GameError(`Keep it to ${this.mode.maxWords} words.`);
+    const sub = { sid: crypto.randomBytes(6).toString('hex'), playerId, text: words.join(' ').slice(0, 600) };
     r.submissions.set(playerId, sub);
     this.touch();
     return sub;
@@ -224,45 +203,9 @@ class Room {
     return c.length > 0 && c.every((p) => this.round.submissions.has(p.id));
   }
 
-  setTranscript(sid, transcript, source) {
-    const sub = this.findSub(sid);
-    if (!sub || !sub.pending) return; // already resolved (e.g. by the timeout fallback)
-    sub.pending = false;
-    if (transcript != null && String(transcript).trim()) {
-      sub.transcript = String(transcript).trim();
-      sub.transcriptSource = source;
-      const a = Fillers.analyze(sub.transcript);
-      const f = Fillers.score(a.count, sub.durationSec, BUST_PER_MIN);
-      Object.assign(sub, { fillers: a.count, segments: a.segments, perMin: f.perMin, bust: f.bust, fluencyPoints: f.points });
-    } else {
-      Object.assign(sub, { fillers: null, segments: null, perMin: null, bust: false, fluencyPoints: 0 });
-    }
-    if (this.phase === 'processing' && ![...this.round.submissions.values()].some((s) => s.pending)) {
-      this.startReveal();
-    } else {
-      this.sync(this);
-    }
-  }
-
+  /** Close answers, give each one an anonymous alias, and open voting. */
   endSubmit() {
     if (this.phase !== 'submit') return;
-    this.clearTimer();
-    this.round.deadline = null;
-    const pending = [...this.round.submissions.values()].filter((s) => s.pending);
-    if (pending.length) {
-      this.phase = 'processing';
-      this.sync(this);
-      // Don't let a slow transcription hold the whole room hostage.
-      this.setTimer(15000, () => {
-        for (const s of pending) if (s.pending) this.setTranscript(s.sid, s.browserTranscript, 'browser');
-        if (this.phase === 'processing') this.startReveal();
-      });
-      return;
-    }
-    this.startReveal();
-  }
-
-  startReveal() {
     this.clearTimer();
     const r = this.round;
     const subs = shuffle([...r.submissions.values()]);
@@ -272,23 +215,11 @@ class Room {
       const [creature, emoji] = creatures[i % creatures.length];
       s.alias = `${adjs[i % adjs.length]} ${creature}`;
       s.emoji = emoji;
-      if (s.kind === 'voice') s.disguise = this.settings.disguise === 'random' ? pick(DISGUISES) : this.settings.disguise;
     });
     r.order = subs.map((s) => s.sid);
-    if (!subs.length) return this.finishRound();
-    this.phase = 'reveal';
-    // Safety net in case the host screen never reports back.
-    this.setTimer(Math.min(300, 40 * subs.length + 15) * 1000, () => this.endReveal());
-    this.sync(this);
-  }
-
-  endReveal(roundIndex) {
-    if (this.phase !== 'reveal') return;
-    if (roundIndex != null && roundIndex !== this.roundIndex) return;
-    this.clearTimer();
-    if (this.round.submissions.size < 2) return this.finishRound();
+    if (subs.length < 2) return this.finishRound(); // nothing to vote between
     this.phase = 'vote';
-    this.round.deadline = now() + this.mode.voteSecs * 1000;
+    r.deadline = now() + this.mode.voteSecs * 1000;
     this.setTimer(this.mode.voteSecs * 1000, () => this.finishRound());
     this.sync(this);
   }
@@ -343,10 +274,10 @@ class Room {
       const votes = tally.get(s.sid);
       const voteCount = Object.values(votes).reduce((a, b) => a + b, 0);
       const wins = mode.categories.filter((c) => winners[c.id].includes(s.sid)).map((c) => c.id);
-      const points = voteCount * POINTS_PER_VOTE + wins.length * WINNER_BONUS + (s.fluencyPoints || 0);
+      const points = voteCount * POINTS_PER_VOTE + wins.length * WINNER_BONUS;
       const author = this.players.get(s.playerId);
       if (author) author.score += points;
-      return { sid: s.sid, playerId: s.playerId, votes, voteCount, wins, points, fluencyPoints: s.fluencyPoints || 0 };
+      return { sid: s.sid, playerId: s.playerId, votes, voteCount, wins, points };
     });
     r.results = { entries, winners };
     r.tip = pick(TIPS[mode.id]);
@@ -355,10 +286,9 @@ class Room {
     this.sync(this);
   }
 
-  /** Host pressed "skip": end the current timed phase now. */
+  /** Host pressed "end early": close the current timed phase now. */
   skipPhase() {
     if (this.phase === 'submit') this.endSubmit();
-    else if (this.phase === 'reveal') this.endReveal();
     else if (this.phase === 'vote') this.finishRound();
   }
 
@@ -366,45 +296,7 @@ class Room {
     if (this.phase === 'results') this.nextRound();
   }
 
-  // ---------- Views (what each screen is allowed to know) ----------
-
-  publicSub(s) {
-    return {
-      sid: s.sid,
-      alias: s.alias,
-      emoji: s.emoji,
-      kind: s.kind,
-      text: s.text,
-      durationSec: s.durationSec ?? null,
-      transcript: s.transcript ?? null,
-      transcriptSource: s.transcriptSource ?? null,
-      segments: s.segments ?? null,
-      fillers: s.fillers ?? null,
-      perMin: s.perMin ?? null,
-      bust: !!s.bust,
-      fluencyPoints: s.fluencyPoints ?? 0,
-      disguise: s.disguise ?? null,
-      hasAudio: !!s.audio,
-    };
-  }
-
-  resultsView(viewerId) {
-    const r = this.round;
-    if (!r?.results) return null;
-    return {
-      winners: r.results.winners,
-      entries: r.results.entries.map((e) => {
-        const p = this.players.get(e.playerId);
-        const showAuthor = this.settings.revealAuthors || e.playerId === viewerId;
-        return {
-          ...e,
-          playerId: undefined,
-          mine: e.playerId === viewerId,
-          author: showAuthor && p ? { name: p.name, avatar: p.avatar } : null,
-        };
-      }),
-    };
-  }
+  // ---------- What each phone is allowed to see ----------
 
   leaderboard() {
     return [...this.players.values()]
@@ -412,84 +304,70 @@ class Room {
       .map((p) => ({ id: p.id, name: p.name, avatar: p.avatar, score: p.score, connected: p.connected }));
   }
 
-  roundBase() {
+  playerView(playerId) {
+    const me = this.players.get(playerId);
     const r = this.round;
-    if (!r) return null;
-    return {
-      index: this.roundIndex,
-      total: this.plan.length,
-      mode: modeMeta(this.mode),
-      prompt: { text: r.prompt.text, parts: r.prompt.parts || null },
-      deadline: r.deadline,
-      submittedCount: r.submissions.size,
-      tip: r.tip,
-    };
-  }
-
-  hostView() {
-    const r = this.round;
-    const showSubs = ['reveal', 'vote', 'results'].includes(this.phase);
+    const mode = this.mode;
+    const board = this.leaderboard();
+    const host = this.players.get(this.hostId);
+    const showAnswers = this.phase === 'vote' || this.phase === 'results';
+    let results = null;
+    if (this.phase === 'results' && r?.results) {
+      results = {
+        winners: r.results.winners,
+        entries: r.results.entries.map((e) => {
+          const p = this.players.get(e.playerId);
+          const mine = e.playerId === playerId;
+          return {
+            sid: e.sid,
+            votes: e.votes,
+            voteCount: e.voteCount,
+            wins: e.wins,
+            points: e.points,
+            mine,
+            // Authors are only named after voting, and only if the host left "reveal" on.
+            author: (this.settings.revealAuthors || mine) && p ? { name: p.name, avatar: p.avatar } : null,
+          };
+        }),
+      };
+    }
     return {
       code: this.code,
       phase: this.phase,
-      settings: this.settings,
-      minPlayers: MIN_PLAYERS,
-      bustPerMin: BUST_PER_MIN,
       serverNow: now(),
+      minPlayers: MIN_PLAYERS,
+      totalRounds: ROUNDS,
+      isHost: this.isHost(playerId),
+      hostName: host?.name || null,
+      settings: this.settings,
+      me: me && { id: me.id, name: me.name, avatar: me.avatar, score: me.score },
+      rank: board.findIndex((p) => p.id === playerId) + 1,
       players: [...this.players.values()].map((p) => ({
         id: p.id,
         name: p.name,
         avatar: p.avatar,
-        score: p.score,
         connected: p.connected,
+        isHost: p.id === this.hostId,
         submitted: !!r && r.submissions.has(p.id),
         voted: this.phase === 'vote' && this.hasVoted(p.id),
       })),
       round: r && {
-        ...this.roundBase(),
-        submissions: showSubs ? this.subs().map((s) => this.publicSub(s)) : [],
-        votedCount: this.phase === 'vote' ? this.connectedPlayers().filter((p) => this.hasVoted(p.id)).length : 0,
-        results: this.resultsView(null),
-      },
-      leaderboard: this.leaderboard(),
-    };
-  }
-
-  playerView(playerId) {
-    const me = this.players.get(playerId);
-    const r = this.round;
-    const board = this.leaderboard();
-    const mySub = r?.submissions.get(playerId);
-    const preview = (s) => {
-      const t = s.kind === 'voice' ? s.transcript : s.text;
-      if (!t) return '🎙️ Voice clip';
-      return t.length > 110 ? `${t.slice(0, 107)}…` : t;
-    };
-    const results = this.phase === 'results' ? this.resultsView(playerId) : null;
-    return {
-      code: this.code,
-      phase: this.phase,
-      serverNow: now(),
-      playerCount: this.connectedPlayers().length,
-      minPlayers: MIN_PLAYERS,
-      me: me && { id: me.id, name: me.name, avatar: me.avatar, score: me.score },
-      rank: board.findIndex((p) => p.id === playerId) + 1,
-      round: r && {
-        ...this.roundBase(),
-        submitted: !!mySub,
-        mySub: mySub && ['reveal', 'vote', 'results'].includes(this.phase) ? this.publicSub(mySub) : null,
-        options:
-          this.phase === 'vote'
-            ? this.subs()
-                .filter((s) => s.playerId !== playerId)
-                .map((s) => ({ sid: s.sid, alias: s.alias, emoji: s.emoji, preview: preview(s) }))
-            : [],
+        index: this.roundIndex,
+        total: this.plan.length,
+        mode,
+        prompt: { text: r.prompt.text, parts: r.prompt.parts || null },
+        deadline: r.deadline,
+        submitted: r.submissions.has(playerId),
+        answers: showAnswers
+          ? this.subs().map((s) => ({ sid: s.sid, alias: s.alias, emoji: s.emoji, text: s.text, mine: s.playerId === playerId }))
+          : [],
         myVotes: r.votes.get(playerId) || {},
-        results: results && { winners: results.winners, mine: results.entries.find((e) => e.mine) || null },
+        results,
+        tip: r.tip,
       },
-      leaderboard: this.phase === 'final' || this.phase === 'results' ? board : null,
+      leaderboard: board,
     };
   }
 }
 
-module.exports = { Room, GameError, MODES, MIN_PLAYERS };
+module.exports = { Room, GameError, MODES, MIN_PLAYERS, ROUNDS };

@@ -1,8 +1,11 @@
-// Phone screen: join, answer, record, vote.
+// The one and only screen. Every device is a player; the room's creator also gets host controls.
 (() => {
-  const { h, setServerNow, secsLeft, wordCount, timer, logo, modeChip, load, save } = SL;
+  const { h, setServerNow, wordCount, timer, logo, modeChip, load, save } = SL;
   const app = document.getElementById('app');
   const socket = io();
+  const STORE = 'sayless.player';
+  const params = new URLSearchParams(location.search);
+
   // The site password is on and this device hasn't entered it (or it changed): go to the login page.
   socket.on('connect_error', async () => {
     try {
@@ -10,14 +13,12 @@
       if (r.status === 401) location.href = `/login?next=${encodeURIComponent(location.pathname + location.search)}`;
     } catch {}
   });
-  const STORE = 'sayless.player';
-  const params = new URLSearchParams(location.search);
 
   let state = null;
   let screenKey = '';
   let session = load(STORE); // { code, playerId, name }
-  let rec = null; // active recording (see startRecording)
-  let busy = false;
+  let info = { lanUrls: [], publicUrl: null };
+  fetch('/api/info').then((r) => r.json()).then((j) => { info = j; }).catch(() => {});
 
   // ---------- Connection ----------
 
@@ -25,55 +26,85 @@
     const urlCode = (params.get('room') || '').toUpperCase();
     if (session && (!urlCode || urlCode === session.code)) {
       socket.emit('player:join', { code: session.code, playerId: session.playerId, name: session.name }, (res) => {
-        if (!res.ok) { session = null; save(STORE, null); renderJoin(res.error); }
+        if (!res.ok) { forget(); renderLanding(res.error === "Can't find that room code." ? 'That game has ended.' : res.error); }
       });
     } else if (!state) {
-      renderJoin();
+      renderLanding();
     }
   });
 
-  socket.on('disconnect', () => {
-    if (state) showToast('Reconnecting…');
-  });
+  socket.on('disconnect', () => { if (state) toast('Reconnecting…'); });
 
   socket.on('player:replaced', () => {
     state = null;
     screenKey = '';
-    app.replaceChildren(hero('📱', 'You joined from another tab', 'This screen is now inactive.'));
+    app.replaceChildren(hero('📱', 'Opened somewhere else', 'You joined from another tab, so this one is paused.'));
   });
 
   socket.on('player:state', (s) => {
     setServerNow(s.serverNow);
+    const wasHost = state?.isHost;
     state = s;
+    if (wasHost === false && s.isHost) toast("You're the host now");
     render();
   });
+
+  function forget() {
+    session = null;
+    save(STORE, null);
+    state = null;
+    screenKey = '';
+    if (params.get('room')) { params.delete('room'); history.replaceState(null, '', '/'); }
+  }
+
+  function leave() {
+    forget();
+    socket.disconnect();
+    socket.connect();
+    renderLanding();
+  }
+
+  function act(event, data) {
+    return new Promise((resolve) => socket.emit(event, data || {}, (res) => {
+      if (!res?.ok && res?.error) toast(res.error);
+      resolve(res || {});
+    }));
+  }
+
+  function toast(msg) {
+    const t = h('div', { class: 'toast' }, msg);
+    document.body.append(t);
+    setTimeout(() => t.remove(), 2600);
+  }
 
   // ---------- Rendering ----------
 
   function keyFor(s) {
     const r = s.round;
+    const roster = s.players.map((p) => `${p.id}${p.connected ? 1 : 0}${p.isHost ? 'h' : ''}`).join(',');
     switch (s.phase) {
-      case 'lobby': return `lobby|${s.playerCount}`;
-      case 'submit': return `submit|${r.index}|${r.submitted}`;
-      case 'vote': return `vote|${r.index}|${r.options.length}`;
-      case 'results': return `results|${r.index}|${s.me?.score}`;
-      case 'final': return `final|${s.rank}|${s.me?.score}`;
-      default: return `${s.phase}|${r?.index}`;
+      case 'lobby': return `lobby|${roster}|${JSON.stringify(s.settings)}|${s.isHost}`;
+      case 'submit': return `submit|${r.index}|${r.submitted}|${s.isHost}`;
+      case 'vote': return `vote|${r.index}|${s.isHost}`;
+      case 'results': return `results|${r.index}|${s.isHost}`;
+      case 'final': return `final|${s.isHost}|${s.me?.score}`;
+      default: return s.phase;
     }
   }
 
   function render() {
     const key = keyFor(state);
     if (key === screenKey) {
-      if (state.phase === 'vote') paintVotes(); // update ticks in place so the list doesn't jump
+      // Same screen: update the live bits in place so typing and scrolling aren't interrupted.
+      paintStatus();
+      if (state.phase === 'vote') paintVotes();
       return;
     }
-    // Never wipe a recording or a half-typed answer because someone else locked in.
-    if (state.phase === 'submit' && screenKey.startsWith(`submit|${state.round.index}|false`) && !state.round.submitted) return;
     screenKey = key;
-    if (rec && state.phase !== 'submit') stopRecording(true);
-    const screens = { lobby, submit, processing, reveal, vote, results, final };
-    app.replaceChildren(...[].concat((screens[state.phase] || lobby)()));
+    const screens = { lobby, submit, vote, results, final };
+    app.replaceChildren(...[].concat((screens[state.phase] || lobby)()).filter(Boolean));
+    paintStatus();
+    window.scrollTo(0, 0);
   }
 
   function top() {
@@ -81,8 +112,9 @@
     return h('div', { class: 'p-top' },
       h('span', { style: 'font-size:1.6rem' }, state.me?.avatar || ''),
       h('span', { class: 'me' }, state.me?.name || ''),
+      state.isHost ? h('span', { class: 'host-tag' }, 'Host') : null,
       h('span', { class: 'spacer' }),
-      r && state.phase !== 'final' ? h('span', { class: 'pill' }, `Round ${r.index + 1}/${r.total}`) : null,
+      r && state.phase !== 'final' ? h('span', { class: 'pill' }, `Round ${r.index + 1}/${r.total}`) : h('span', { class: 'pill' }, `Room ${state.code}`),
       h('span', { class: 'pill' }, `${state.me?.score ?? 0} pts`)
     );
   }
@@ -96,333 +128,270 @@
     );
   }
 
-  function showToast(msg) {
-    const t = h('div', { class: 'pill', style: 'position:fixed;top:12px;left:50%;transform:translateX(-50%);background:#000;color:#fff;z-index:9' }, msg);
-    document.body.append(t);
-    setTimeout(() => t.remove(), 2500);
+  /** "Who's in" chips, refreshed in place (see paintStatus). */
+  function statusRow(flag) {
+    return h('div', { class: 'status-chips', id: 'status', 'data-flag': flag });
+  }
+  function paintStatus() {
+    const el = document.getElementById('status');
+    if (!el || !state) return;
+    const flag = el.dataset.flag;
+    el.replaceChildren(...state.players.filter((p) => p.connected).map((p) =>
+      h('span', { class: `chip${p[flag] ? ' done' : ''}` }, `${p.avatar} ${p.name}${p[flag] ? ' ✓' : ''}`)));
   }
 
-  // ---------- Join ----------
+  /** Host-only buttons. */
+  function hostBar(...buttons) {
+    if (!state.isHost) return null;
+    return h('div', { class: 'host-bar' }, h('span', { class: 'host-tag' }, 'Host controls'), ...buttons);
+  }
 
-  function renderJoin(error) {
-    screenKey = 'join';
-    const code = h('input', { class: 'input code', maxlength: '4', autocomplete: 'off', autocapitalize: 'characters', placeholder: 'ABCD', value: params.get('room') || session?.code || '' });
-    const name = h('input', { class: 'input', maxlength: '16', autocomplete: 'nickname', placeholder: 'Your name', value: session?.name || '' });
-    const err = h('div', { class: 'error' }, error || '');
-    const btn = h('button', { class: 'btn block', type: 'submit' }, 'Join game');
-    const form = h('form', { class: 'stack', onsubmit: (e) => {
-      e.preventDefault();
-      if (busy) return;
-      busy = true;
-      btn.disabled = true;
-      socket.emit('player:join', { code: code.value, name: name.value }, (res) => {
-        busy = false;
-        btn.disabled = false;
-        if (!res.ok) { err.textContent = res.error; return; }
-        session = { code: res.code, playerId: res.playerId, name: res.name };
-        save(STORE, session);
-      });
-    } },
-      h('div', { class: 'field' }, h('label', {}, 'Room code'), code),
-      h('div', { class: 'field' }, h('label', {}, 'Name'), name),
-      err,
-      btn
-    );
+  // ---------- Landing: join or create ----------
+
+  function renderLanding(error) {
+    screenKey = 'landing';
     const invited = !!params.get('room'); // came from a QR code / invite link: joining is the main action
+    const name = h('input', { class: 'input', maxlength: '16', autocomplete: 'nickname', placeholder: 'Your name', value: session?.name || '' });
+    const code = h('input', { class: 'input code', maxlength: '4', autocomplete: 'off', autocapitalize: 'characters', placeholder: 'ABCD', value: params.get('room') || '' });
+    const err = h('div', { class: 'error' }, error || '');
+    let busy = false;
+
+    async function go(event, payload) {
+      if (busy) return;
+      if (!name.value.trim()) { err.textContent = 'Type your name first.'; name.focus(); return; }
+      busy = true;
+      err.textContent = '';
+      const res = await act(event, { name: name.value, ...payload });
+      busy = false;
+      if (!res.ok) { err.textContent = res.error || 'Something went wrong.'; return; }
+      session = { code: res.code, playerId: res.playerId, name: res.name };
+      save(STORE, session);
+    }
+
     app.replaceChildren(h('div', { class: 'p-hero' },
       logo('4.2rem'),
       h('p', { class: 'muted', style: 'margin:0' }, 'The party game that makes you a sharper speaker.'),
-      h('h2', { class: 'choice-title' }, 'Join a game'),
-      form,
+      h('div', { class: 'field' }, h('label', {}, 'Your name'), name),
+      h('form', { class: 'stack', onsubmit: (e) => { e.preventDefault(); go('player:join', { code: code.value }); } },
+        h('h2', { class: 'choice-title' }, 'Join a game'),
+        h('div', { class: 'field' }, h('label', {}, 'Room code'), code),
+        h('button', { class: 'btn block', type: 'submit' }, 'Join game')
+      ),
       h('div', { class: 'or' }, h('span', {}, 'or')),
-      h('h2', { class: 'choice-title' }, 'Host a game'),
-      h('a', { class: `btn block ${invited ? 'ghost' : 'alt'}`, href: '/host', style: 'text-decoration:none;display:block' }, 'Create a room'),
-      h('p', { class: 'muted', style: 'margin:0;font-size:.9rem' }, 'Opens the host screen. Best on a laptop or TV everyone can see.')
+      h('div', { class: 'stack' },
+        h('h2', { class: 'choice-title' }, 'Host a game'),
+        h('button', { class: `btn block ${invited ? 'ghost' : 'alt'}`, type: 'button', onclick: () => go('player:create') }, 'Create a room'),
+        h('p', { class: 'muted', style: 'margin:0;font-size:.9rem' }, "You'll play too, and you get the Start and Next buttons.")
+      ),
+      err
     ));
-    (code.value ? name : code).focus();
+    name.focus();
   }
 
-  // ---------- Phases ----------
+  // ---------- Lobby ----------
+
+  function joinUrl() {
+    if (info.publicUrl) return `${info.publicUrl.replace(/\/$/, '')}/?room=${state.code}`;
+    const local = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+    const base = local && info.lanUrls?.[0] ? info.lanUrls[0] : location.origin;
+    return `${base}/?room=${state.code}`;
+  }
 
   function lobby() {
-    return [top(), hero(state.me?.avatar || '🎉', "You're in!", 'Watch the big screen. The host will start soon.',
-      h('div', { class: 'pill', style: 'align-self:center' }, `${state.playerCount} player${state.playerCount === 1 ? '' : 's'} here`),
-      state.playerCount < state.minPlayers ? h('p', { class: 'muted' }, `Need ${state.minPlayers - state.playerCount} more to start.`) : null
-    )];
+    const s = state;
+    const connected = s.players.filter((p) => p.connected);
+    const need = Math.max(0, s.minPlayers - connected.length);
+    const url = joinUrl();
+
+    const share = async () => {
+      try {
+        if (navigator.share) await navigator.share({ title: 'Join my Say Less game', text: `Room code: ${s.code}`, url });
+        else { await navigator.clipboard.writeText(url); toast('Invite link copied'); }
+      } catch {}
+    };
+
+    let settings = null;
+    if (s.isHost) {
+      const set = (patch) => act('host:settings', { ...s.settings, ...patch });
+      const modeBtn = (m, label) => {
+        const on = s.settings.modes.includes(m);
+        return h('button', { class: on ? 'on' : '', onclick: () => {
+          const modes = on ? s.settings.modes.filter((x) => x !== m) : [...s.settings.modes, m];
+          if (modes.length) set({ modes });
+          else toast('Keep at least one mode.');
+        } }, label);
+      };
+      settings = h('div', { class: 'settings' },
+        h('div', { class: 'set-row' }, h('span', {}, 'Modes'),
+          h('div', { class: 'seg' }, modeBtn('link', 'Missing Link'), modeBtn('pitch', 'One Line Pitch'))),
+        h('div', { class: 'set-row' }, h('span', {}, 'After voting'),
+          h('div', { class: 'seg' },
+            h('button', { class: s.settings.revealAuthors ? 'on' : '', onclick: () => set({ revealAuthors: true }) }, 'Show who wrote what'),
+            h('button', { class: s.settings.revealAuthors ? '' : 'on', onclick: () => set({ revealAuthors: false }) }, 'Stay anonymous')))
+      );
+    }
+
+    return [
+      top(),
+      h('div', { class: 'card center lobby-card' },
+        h('div', { class: 'muted-dark' }, 'Room code'),
+        h('div', { class: 'room-code' }, s.code),
+        h('div', { class: 'qr' }, h('img', { src: `/api/qr?text=${encodeURIComponent(url)}`, alt: `QR code to join room ${s.code}` })),
+        h('div', { class: 'muted-dark', style: 'font-size:.9rem' }, 'Friends scan this, or open the site and type the code.'),
+        h('button', { class: 'btn block share-btn', onclick: share }, 'Share invite link')
+      ),
+      h('div', { class: 'row' },
+        h('h2', {}, `Players (${connected.length})`),
+        h('span', { class: 'spacer' }),
+        h('span', { class: 'muted' }, need ? `Need ${need} more` : 'Ready!')
+      ),
+      h('div', { class: 'player-list' }, s.players.map((p) =>
+        h('div', { class: `player-row${p.connected ? '' : ' off'}` },
+          h('span', { class: 'em' }, p.avatar),
+          h('span', { class: 'nm' }, p.name, p.id === s.me?.id ? ' (you)' : ''),
+          p.isHost ? h('span', { class: 'host-tag' }, 'Host') : null))),
+      settings,
+      s.isHost
+        ? h('button', { class: 'btn block', disabled: need > 0, onclick: () => act('host:start') },
+            need ? `Waiting for ${need} more player${need === 1 ? '' : 's'}…` : 'Start the game')
+        : h('p', { class: 'muted center' }, `Waiting for ${s.hostName || 'the host'} to start the game…`),
+      h('button', { class: 'linkish', onclick: () => { if (confirm('Leave this room?')) leave(); } }, 'Leave room'),
+    ];
   }
 
-  function promptCard(r) {
+  // ---------- Answer ----------
+
+  function promptCard(r, small) {
     return h('div', { class: 'card prompt-card' },
       h('div', { class: 'row' }, modeChip(r.mode), h('span', { class: 'spacer' }), timer(r.deadline)),
       r.prompt.parts
         ? h('div', { class: 'link-pair' }, h('div', { class: 'obj' }, r.prompt.parts[0]), h('div', { class: 'plus' }, '+'), h('div', { class: 'obj' }, r.prompt.parts[1]))
-        : h('div', { class: 'prompt' }, r.prompt.text)
+        : h('div', { class: 'prompt', style: small ? 'font-size:1.15rem' : '' }, r.prompt.text)
     );
   }
 
   function submit() {
     const r = state.round;
-    if (r.submitted) return [top(), hero('🔒', 'Locked in!', 'Waiting for everyone else…')];
-    const body = r.mode.input === 'voice' ? voiceInput(r) : textInput(r, r.mode.maxWords);
-    return [top(), promptCard(r), body];
-  }
-
-  function textInput(r, maxWords, { typedFallback = false } = {}) {
-    const placeholder = {
-      link: 'How are these two connected?',
-      pitch: 'One sentence. Twenty words, max.',
-      ums: 'Type your rant instead (no fluency points)…',
-    }[r.mode.id];
-    const ta = h('textarea', { class: 'input', placeholder, maxlength: '600' });
-    const count = h('div', { class: 'counter' }, `0/${maxWords} words`);
+    const endEarly = hostBar(h('button', { class: 'btn ghost', onclick: () => act('host:skip') }, 'End answering now'));
+    if (r.submitted) {
+      return [top(), promptCard(r), hero('🔒', 'Locked in!', 'Waiting for everyone else…'), statusRow('submitted'), endEarly];
+    }
+    const max = r.mode.maxWords;
+    const ta = h('textarea', { class: 'input', maxlength: '600', placeholder: r.mode.id === 'link' ? 'How are these two connected?' : 'One sentence. Twenty words, max.' });
+    const count = h('div', { class: 'counter' }, `0/${max} words`);
     const err = h('div', { class: 'error' });
     const btn = h('button', { class: 'btn block', disabled: true }, 'Lock it in');
     ta.addEventListener('input', () => {
       const n = wordCount(ta.value);
-      count.textContent = `${n}/${maxWords} words`;
-      count.classList.toggle('over', n > maxWords);
-      btn.disabled = n === 0 || n > maxWords;
+      count.textContent = `${n}/${max} words`;
+      count.classList.toggle('over', n > max);
+      btn.disabled = n === 0 || n > max;
     });
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       btn.disabled = true;
-      socket.emit('player:submit', { text: ta.value, typed: typedFallback }, (res) => {
-        if (!res.ok) { err.textContent = res.error; btn.disabled = false; }
-      });
+      const res = await act('player:submit', { text: ta.value });
+      if (!res.ok) { err.textContent = res.error; btn.disabled = false; }
     });
     setTimeout(() => ta.focus(), 50);
-    return h('div', { class: 'stack' }, ta, count, err, btn);
+    return [top(), promptCard(r), ta, count, err, btn, statusRow('submitted'), endEarly];
   }
 
-  // ---------- Voice recording ----------
-
-  function voiceInput(r) {
-    const wrap = h('div', { class: 'rec-wrap' });
-    const err = h('div', { class: 'error center' });
-    const canRecord = !!(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
-
-    const idle = () => {
-      wrap.replaceChildren(
-        h('button', { class: 'rec-btn', onclick: () => startRecording(r, wrap, err, review) }, 'Tap to talk'),
-        h('p', { class: 'muted center', style: 'margin:0' }, `Talk for ${r.mode.recordMinSecs}–${r.mode.recordMaxSecs} seconds. Your voice will be disguised.`),
-        !canRecord ? h('div', { class: 'warn' }, window.isSecureContext ? "This browser can't record audio." : 'The mic only works over a secure (https) link. Ask the host for the https link, or type your answer below.') : null,
-        err,
-        h('button', { class: 'linkish', onclick: () => wrap.replaceChildren(textInput(r, r.mode.maxWords, { typedFallback: true })) }, "Can't talk right now? Type it instead")
-      );
-    };
-
-    const review = (clip) => {
-      const audio = h('audio', { controls: true, src: URL.createObjectURL(clip.blob), style: 'width:100%' });
-      const send = h('button', { class: 'btn block' }, `Send it (${Math.round(clip.durationSec)}s)`);
-      const redo = h('button', { class: 'btn ghost block' }, 'Redo');
-      send.addEventListener('click', () => sendClip(clip, send, err));
-      redo.addEventListener('click', idle);
-      const tooShort = clip.durationSec < r.mode.recordMinSecs;
-      wrap.replaceChildren(
-        h('div', { class: 'live-um' }, 'Ums spotted: ', h('b', {}, String(Fillers.analyze(clip.transcript).count))),
-        audio,
-        tooShort ? h('div', { class: 'error center' }, `That was under ${r.mode.recordMinSecs}s — you'll earn fewer fluency points.`) : null,
-        err,
-        send,
-        secsLeft(r.deadline) > 8 ? redo : null
-      );
-    };
-
-    if (rec?.clip) review(rec.clip);
-    else idle();
-    return wrap;
-  }
-
-  async function startRecording(r, wrap, err, onDone) {
-    let stream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
-    } catch {
-      err.textContent = 'Microphone blocked. Allow mic access in your browser settings, or type your answer.';
-      return;
-    }
-    const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'].find((t) => MediaRecorder.isTypeSupported?.(t)) || '';
-    const mr = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
-    const chunks = [];
-    rec = { mr, stream, chunks, startedAt: performance.now(), finals: [], interim: '', onDone, clip: null };
-    mr.ondataavailable = (e) => e.data.size && chunks.push(e.data);
-    mr.onstop = () => {
-      const durationSec = (performance.now() - rec.startedAt) / 1000;
-      const blob = new Blob(chunks, { type: mr.mimeType || mime || 'audio/webm' });
-      stream.getTracks().forEach((t) => t.stop());
-      const clip = { blob, mime: blob.type, durationSec, transcript: transcriptText() };
-      rec.clip = clip;
-      clearInterval(rec.tick);
-      if (rec.autoSend) sendClip(clip);
-      else rec.onDone(clip);
-    };
-
-    // Free filler counting via the phone's own speech recognition (Chrome, Safari).
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (SR) {
-      try {
-        const sr = new SR();
-        sr.continuous = true;
-        sr.interimResults = true;
-        sr.lang = 'en-US';
-        sr.onresult = (e) => {
-          let interim = '';
-          for (let i = e.resultIndex; i < e.results.length; i++) {
-            const res = e.results[i];
-            if (res.isFinal) rec.finals.push(res[0].transcript.trim());
-            else interim += res[0].transcript;
-          }
-          rec.interim = interim;
-          paintLive();
-        };
-        sr.onend = () => { if (rec && rec.mr.state === 'recording') try { sr.start(); } catch {} };
-        sr.start();
-        rec.sr = sr;
-      } catch { /* recognition is a bonus, not required */ }
-    }
-
-    mr.start(250);
-    const timeEl = h('div', { class: 'rec-time' }, '0s');
-    const umEl = h('b', {}, '0');
-    const live = h('div', { class: 'live-transcript' });
-    rec.paint = { timeEl, umEl, live };
-    wrap.replaceChildren(
-      h('button', { class: 'rec-btn live', onclick: () => stopRecording() }, 'Tap to stop'),
-      timeEl,
-      rec.sr ? h('div', { class: 'live-um' }, 'Ums: ', umEl) : h('div', { class: 'muted' }, 'Recording…'),
-      live
-    );
-    rec.tick = setInterval(() => {
-      const el = (performance.now() - rec.startedAt) / 1000;
-      timeEl.textContent = `${Math.floor(el)}s / ${r.mode.recordMaxSecs}s`;
-      const left = secsLeft(r.deadline);
-      if (el >= r.mode.recordMaxSecs) stopRecording();
-      else if (left != null && left <= 1) { rec.autoSend = true; stopRecording(); } // round is ending: send what we have
-    }, 200);
-  }
-
-  function transcriptText() {
-    return rec ? [...rec.finals, rec.interim].join(' ').replace(/\s+/g, ' ').trim() : '';
-  }
-
-  function paintLive() {
-    if (!rec?.paint) return;
-    const text = transcriptText();
-    rec.paint.umEl.textContent = String(Fillers.analyze(text).count);
-    rec.paint.live.textContent = text.slice(-140);
-  }
-
-  function stopRecording(discard = false) {
-    if (!rec) return;
-    try { rec.sr?.stop(); } catch {}
-    if (discard) {
-      clearInterval(rec.tick);
-      rec.mr.onstop = null;
-      try { rec.mr.state !== 'inactive' && rec.mr.stop(); } catch {}
-      rec.stream.getTracks().forEach((t) => t.stop());
-      rec = null;
-      return;
-    }
-    if (rec.mr.state !== 'inactive') rec.mr.stop();
-  }
-
-  async function sendClip(clip, btn, err) {
-    if (rec) rec.sending = true;
-    if (btn) btn.disabled = true;
-    const audio = await clip.blob.arrayBuffer();
-    socket.emit('player:submit', { audio, mime: clip.mime, durationSec: clip.durationSec, browserTranscript: clip.transcript }, (res) => {
-      if (res.ok) { rec = null; return; }
-      if (rec) rec.sending = false;
-      if (err) err.textContent = res.error;
-      if (btn) btn.disabled = false;
-    });
-  }
-
-  // A recorded-but-unsent clip goes in automatically just before the round closes.
-  setInterval(() => {
-    if (state?.phase !== 'submit' || !rec?.clip || rec.sending) return;
-    const left = secsLeft(state.round.deadline);
-    if (left != null && left <= 1) sendClip(rec.clip);
-  }, 300);
-
-  // ---------- After submitting ----------
-
-  function processing() {
-    return [top(), hero('🤖', 'Counting the ums…', 'The robot is listening very carefully.', h('div', { class: 'spinner' }))];
-  }
-
-  function reveal() {
-    return [top(), hero('👀', 'Eyes on the big screen', 'Answers are being revealed — anonymously.')];
-  }
+  // ---------- Vote ----------
 
   function vote() {
     const r = state.round;
-    if (!r.options.length) return [top(), hero('🗳️', 'Sit this one out', 'There was nothing for you to vote on.')];
     const cats = r.mode.categories.map((c) =>
       h('div', { class: 'vote-cat' },
         h('h3', {}, c.label),
-        r.options.map((o) =>
-          h('button', {
-            class: `vote-opt${r.myVotes[c.id] === o.sid ? ' picked' : ''}`,
-            'data-cat': c.id,
-            'data-sid': o.sid,
-            onclick: () => socket.emit('player:vote', { category: c.id, sid: o.sid }, (res) => { if (!res.ok) showToast(res.error); }),
-          },
-            h('span', { class: 'em' }, o.emoji),
-            h('span', {}, h('div', { class: 'who' }, o.alias), h('div', {}, o.preview))
-          )
-        )
+        r.answers.map((a) => a.mine
+          ? h('div', { class: 'vote-opt mine' },
+              h('span', { class: 'em' }, a.emoji),
+              h('span', {}, h('div', { class: 'who' }, `${a.alias} · yours`), h('div', {}, a.text)))
+          : h('button', {
+              class: `vote-opt${r.myVotes[c.id] === a.sid ? ' picked' : ''}`,
+              'data-cat': c.id,
+              'data-sid': a.sid,
+              onclick: () => act('player:vote', { category: c.id, sid: a.sid }),
+            },
+              h('span', { class: 'em' }, a.emoji),
+              h('span', {}, h('div', { class: 'who' }, a.alias), h('div', {}, a.text))))
       )
     );
-    const done = r.mode.categories.every((c) => r.myVotes[c.id]);
     return [
       top(),
-      h('div', { class: 'row' }, h('h2', { id: 'vote-title' }, done ? 'Votes in ✓' : 'Vote!'), h('span', { class: 'spacer' }), timer(r.deadline)),
-      h('p', { class: 'muted', id: 'vote-sub', style: 'margin:0' }, done ? 'You can still change your mind until time runs out.' : "Tap your favourite. You can't vote for your own."),
+      promptCard(r, true),
+      h('h2', { id: 'vote-title' }, 'Vote!'),
+      h('p', { class: 'muted', id: 'vote-sub', style: 'margin:0' }, "Tap your favourite. Answers are anonymous, and you can't vote for your own."),
       ...cats,
+      statusRow('voted'),
+      hostBar(h('button', { class: 'btn ghost', onclick: () => act('host:skip') }, 'End voting now')),
     ];
   }
 
   function paintVotes() {
     const r = state.round;
-    document.querySelectorAll('.vote-opt').forEach((b) => b.classList.toggle('picked', r.myVotes[b.dataset.cat] === b.dataset.sid));
+    document.querySelectorAll('.vote-opt[data-cat]').forEach((b) => b.classList.toggle('picked', r.myVotes[b.dataset.cat] === b.dataset.sid));
     const done = r.mode.categories.every((c) => r.myVotes[c.id]);
     const t = document.getElementById('vote-title');
     const sub = document.getElementById('vote-sub');
     if (t) t.textContent = done ? 'Votes in ✓' : 'Vote!';
-    if (sub) sub.textContent = done ? 'You can still change your mind until time runs out.' : "Tap your favourite. You can't vote for your own.";
+    if (sub) sub.textContent = done ? 'You can still change your mind until time runs out.' : "Tap your favourite. Answers are anonymous, and you can't vote for your own.";
+  }
+
+  // ---------- Results ----------
+
+  function scoreboard() {
+    return h('div', { class: 'scoreboard' }, h('h3', {}, 'Scores'),
+      state.leaderboard.map((p, i) => h('div', { class: `score-row${p.id === state.me?.id ? ' me-row' : ''}` },
+        h('span', {}, `${i + 1}.`), h('span', {}, p.avatar), h('span', {}, p.name), h('span', { class: 'sc' }, p.score))));
   }
 
   function results() {
     const r = state.round;
-    const mine = r.results?.mine;
-    const pts = mine?.points || 0;
-    const lines = [];
-    if (mine) {
-      if (mine.voteCount) lines.push(`${mine.voteCount} vote${mine.voteCount === 1 ? '' : 's'}`);
-      if (mine.wins?.length) lines.push(`🏆 won ${mine.wins.map((w) => r.mode.categories.find((c) => c.id === w)?.label).join(' + ')}`);
-    }
-    const sub = r.mySub;
-    if (sub?.kind === 'voice') {
-      if (sub.fillers == null) lines.push('Fluency not measured this time');
-      else if (sub.bust) lines.push(`💥 BUSTED — ${sub.fillers} fillers (${sub.perMin}/min)`);
-      else lines.push(`${sub.fillers} filler${sub.fillers === 1 ? '' : 's'} → +${sub.fluencyPoints} fluency`);
-    }
+    const res = r.results || { entries: [] };
+    const answers = Object.fromEntries(r.answers.map((a) => [a.sid, a]));
+    const entries = [...res.entries].sort((a, b) => b.points - a.points);
+    const mine = res.entries.find((e) => e.mine);
+    const last = r.index + 1 >= r.total;
     return [
       top(),
-      h('div', { class: 'p-hero' },
-        h('div', { class: 'points-big' }, `+${pts}`),
-        h('p', { style: 'margin:0;font-size:1.1rem' }, mine ? lines.join(' · ') || 'No votes this time.' : "You didn't answer this round."),
-        h('div', { class: 'pill', style: 'align-self:center' }, `#${state.rank} of ${state.leaderboard?.length || state.playerCount} · ${state.me.score} pts`),
-        r.tip ? h('div', { class: 'tip' }, h('b', {}, "Coach's tip"), r.tip) : null
-      ),
+      h('div', { class: 'center' },
+        h('div', { class: 'points-big' }, `+${mine?.points || 0}`),
+        h('p', { class: 'muted', style: 'margin:4px 0 0' }, mine ? `${mine.voteCount} vote${mine.voteCount === 1 ? '' : 's'} for your answer` : "You didn't answer this round.")),
+      entries.length ? null : hero('🤷', 'Not enough answers to vote on', null),
+      h('div', { class: 'stack' }, entries.map((e) => {
+        const a = answers[e.sid] || {};
+        const winLabels = e.wins.map((w) => r.mode.categories.find((c) => c.id === w)?.label);
+        return h('div', { class: `card result-card${e.wins.length ? ' win' : ''}` },
+          h('div', { class: 'pts' }, `+${e.points}`),
+          h('div', { class: 'who' }, h('span', { class: 'em' }, a.emoji), a.alias, e.mine ? ' · yours' : ''),
+          h('div', { class: 'txt' }, a.text),
+          h('div', { class: 'badges' },
+            winLabels.map((l) => h('span', { class: 'badge' }, `🏆 ${l}`)),
+            h('span', { class: 'badge mint' }, `${e.voteCount} vote${e.voteCount === 1 ? '' : 's'}`)),
+          e.author ? h('div', { class: 'author' }, `${e.author.avatar} ${e.author.name}`) : null);
+      })),
+      r.tip ? h('div', { class: 'tip' }, h('b', {}, "Coach's tip"), r.tip) : null,
+      scoreboard(),
+      state.isHost
+        ? hostBar(h('button', { class: 'btn', onclick: () => act('host:next') }, last ? 'See final scores' : 'Next round ▶'))
+        : h('p', { class: 'muted center' }, `Waiting for ${state.hostName || 'the host'} to continue…`),
     ];
   }
 
+  // ---------- Final ----------
+
   function final() {
+    const lb = state.leaderboard;
     const medal = ['🥇', '🥈', '🥉'][state.rank - 1] || '🎉';
     return [
       top(),
-      hero(medal, state.rank === 1 ? 'You won!' : `You finished #${state.rank}`, `${state.me.score} points. Thanks for playing!`),
+      hero(medal, state.rank === 1 ? 'You won!' : `You finished #${state.rank}`, lb[0] ? `${lb[0].name} wins with ${lb[0].score} points.` : null),
+      scoreboard(),
+      state.isHost
+        ? hostBar(h('button', { class: 'btn', onclick: () => act('host:playAgain') }, 'Play again'))
+        : h('p', { class: 'muted center' }, `${state.hostName || 'The host'} can start another game.`),
+      h('button', { class: 'linkish', onclick: leave }, 'Leave room'),
     ];
   }
 })();
