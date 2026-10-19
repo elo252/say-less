@@ -61,6 +61,25 @@ async function main() {
   r = await login('pancake-pirates');
   assert.match(r.headers.get('location'), /error=2/);
   console.log('  ✓ password guessing is rate-limited');
+
+  // Locked mode: REQUIRE_PASSWORD on, no password yet → nothing is reachable.
+  const LP = 3997;
+  const locked = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
+    env: { ...process.env, PORT: String(LP), REQUIRE_PASSWORD: 'true', GAME_PASSWORD: '' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  try {
+    await new Promise((res) => locked.stdout.on('data', (d) => d.toString().includes('running') && res()));
+    assert.equal((await fetch(`http://localhost:${LP}/host`)).status, 503);
+    assert.equal((await fetch(`http://localhost:${LP}/healthz`)).status, 200);
+    const ok = await new Promise((res) => {
+      const s = io(`http://localhost:${LP}`, { transports: ['websocket'], reconnection: false, timeout: 3000 });
+      s.on('connect', () => { s.close(); res(true); });
+      s.on('connect_error', () => { s.close(); res(false); });
+    });
+    assert.equal(ok, false);
+    console.log('  ✓ with REQUIRE_PASSWORD and no password set, the site stays locked');
+  } finally { locked.kill(); }
   console.log('\nPassword test passed');
 }
 

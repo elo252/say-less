@@ -12,6 +12,9 @@ const TOKEN = PASSWORD
   : '';
 
 const enabled = () => !!PASSWORD;
+// On a public host we never want the game open to everyone, even for a minute:
+// with REQUIRE_PASSWORD=true and no GAME_PASSWORD set, the whole site stays locked.
+const locked = () => process.env.REQUIRE_PASSWORD === 'true' && !PASSWORD;
 
 function safeEqual(a, b) {
   const ha = crypto.createHash('sha256').update(String(a)).digest();
@@ -28,6 +31,7 @@ function cookieValue(header, name) {
 }
 
 function isAuthed(cookieHeader) {
+  if (locked()) return false;
   if (!enabled()) return true;
   const v = cookieValue(cookieHeader, COOKIE);
   return !!v && safeEqual(v, TOKEN);
@@ -76,8 +80,26 @@ function loginPage(next, error) {
 </div></main></body></html>`;
 }
 
+function lockedPage() {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
+<title>Say Less · Not ready</title><link rel="stylesheet" href="/style.css"></head>
+<body class="player"><main id="app"><div class="p-hero">
+<div class="big-emoji">🔒</div><h1 style="font-size:2rem">Not open yet</h1>
+<p class="muted">This game is private and hasn't been given a password yet.<br>Owner: add <b>GAME_PASSWORD</b> in your host's environment settings.</p>
+</div></main></body></html>`;
+}
+
 /** Express routes + gate. Call before serving any other route. */
 function install(app) {
+  if (locked()) {
+    console.warn('  ⚠ REQUIRE_PASSWORD is on but GAME_PASSWORD is not set — the site is locked.');
+    app.use((req, res) => {
+      if (req.path === '/style.css') return res.sendFile(require('path').join(__dirname, '..', 'public', 'style.css'));
+      res.status(503).type('html').send(lockedPage());
+    });
+    return;
+  }
   if (!enabled()) return;
   const express = require('express');
 
@@ -106,4 +128,4 @@ function install(app) {
   });
 }
 
-module.exports = { install, isAuthed, enabled };
+module.exports = { install, isAuthed, enabled, locked };

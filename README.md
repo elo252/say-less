@@ -86,7 +86,7 @@ Everything players see comes from plain lists in `src/bank/` — edit them freel
 | `tips.js` | Coach's tips shown after each round | 12 per mode |
 | `aliases.js` | Anonymous names and avatars | 30 × 30 aliases |
 
-Prompts never repeat within a game.
+Prompts never repeat within a game. After editing, push to GitHub and Render redeploys automatically.
 
 ---
 
@@ -97,6 +97,7 @@ Prompts never repeat within a game.
 | `PORT` | `3000` | Port to listen on |
 | `PUBLIC_URL` | — | Address the QR code points to (use your https tunnel/deploy URL) |
 | `GAME_PASSWORD` | — | Turns on the site-wide password |
+| `REQUIRE_PASSWORD` | — | `true` keeps the whole site locked until `GAME_PASSWORD` is set (on by default on Render) |
 | `SESSION_SECRET` | — | Optional extra secret for the login cookie (Render generates one) |
 | `MIN_PLAYERS` | `3` | Players needed to start (set to `2` for quick testing) |
 | `BUST_PER_MIN` | `5` | Fillers per minute that trigger a bust |

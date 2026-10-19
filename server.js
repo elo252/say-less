@@ -210,7 +210,7 @@ server.listen(PORT, () => {
   console.log(`  Host screen (open on the TV/laptop):  http://localhost:${PORT}/host`);
   for (const u of lanUrls()) console.log(`  Phones on the same Wi-Fi join at:     ${u}`);
   if (process.env.PUBLIC_URL) console.log(`  Public link:                          ${process.env.PUBLIC_URL}`);
-  console.log(`  Password protection: ${auth.enabled() ? 'ON' : 'off (set GAME_PASSWORD to turn on)'}`);
+  console.log(`  Password protection: ${auth.enabled() ? 'ON' : auth.locked() ? 'LOCKED until GAME_PASSWORD is set' : 'off (set GAME_PASSWORD to turn on)'}`);
   console.log(`  Prompt bank: ${Object.entries(bankSize()).map(([k, v]) => `${v.toLocaleString()} ${k}`).join(', ')}\n`);
 });
 
